@@ -200,13 +200,63 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         gt_image_tensor = torch.cat(gt_images,0)
         # Loss
         # breakpoint()
-        Ll1 = l1_loss(image_tensor, gt_image_tensor[:,:3,:,:])
+        # Encourage visibility-based shaping
 
-        psnr_ = psnr(image_tensor, gt_image_tensor).mean().double()
-        # norm
-        
+        # --- Configurable parameters
+        importance_update_freq = 1                # How often to update importance_target
+        importance_loss_weight = 1.0              # Scale of importance loss
+        importance_mean_weight = 0.01             # Regularize mean importance
+        opacity_regularizer_weight = 0.001        # Regularize opacity
+        grad_clamp_min = 0.5                      # Prevent punishing low-gradient points
+        prune_freq = 500                          # Frequency of pruning by importance
+        prune_threshold = 0.1                     # Prune Gaussians with importance < threshold
 
-        loss = Ll1
+        # Contrastive sharpening config - does not work yet
+        importance_contrastive_weight = 0.01
+        contrastive_high_thresh = 0.6
+        contrastive_low_thresh = 0.2
+
+        # --- Update importance_target every N steps - expensive (think of alternative)
+        if (iteration - 1) % importance_update_freq == 0:
+            vis_mask = render_pkg["visibility_filter"].unsqueeze(-1)
+            contribution = vis_mask * gaussians.get_opacity.detach()
+
+            normed_grad = (gaussians.xyz_gradient_accum / gaussians.denom.clamp_min(1e-6)).unsqueeze(-1)
+            normed_grad = normed_grad / normed_grad.max().clamp_min(1e-6)
+            normed_grad = normed_grad.clamp(min=grad_clamp_min)
+
+            importance_target = (contribution * normed_grad.detach())
+            gaussians._cached_importance_target = importance_target  # cache for future steps
+
+        # --- Compute losses
+        Ll1 = l1_loss(image_tensor, gt_image_tensor[:, :3, :, :])
+        psnr_ = psnr(image_tensor, gt_image_tensor).mean()
+
+        # Base importance loss - expensive (think of alternative) / Try different functions
+        importance_loss = torch.nn.SmoothL1Loss(beta=0.1)(
+            gaussians.importance,
+            gaussians._cached_importance_target
+        )
+
+        # Contrastive sharpening --- does not work yest
+        # target = gaussians._cached_importance_target.detach().squeeze(-1)
+        # importance = gaussians.importance.squeeze(-1)
+
+        # high_mask = target > contrastive_high_thresh
+        # low_mask = target < contrastive_low_thresh
+
+        # high_push = ((importance[high_mask] - target[high_mask]) ** 2).mean() if high_mask.any() else 0.0
+        # low_push = (importance[low_mask] ** 2).mean() if low_mask.any() else 0.0
+
+        # importance_contrastive_loss = importance_contrastive_weight * (high_push + low_push)
+
+        # Regularizers
+        opacity_regularizer = opacity_regularizer_weight * gaussians.get_opacity.mean()
+        importance_regularizer = importance_mean_weight * gaussians.importance.mean()
+
+        # --- Final total loss
+        loss = Ll1 + (importance_loss_weight * importance_loss) + importance_regularizer + opacity_regularizer # + importance_contrastive_loss
+
         if stage == "fine" and hyper.time_smoothness_weight != 0:
             # tv_loss = 0
             tv_loss = gaussians.compute_regulation(hyper.time_smoothness_weight, hyper.l1_time_planes, hyper.plane_tv_weight)
@@ -219,6 +269,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         #     loss += opt.lambda_lpips * lpipsloss
 
         loss.backward()
+
         if torch.isnan(loss).any():
             print("loss is nan,end training, reexecv program now.")
             os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -257,6 +308,9 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
                     # total_images.append(to8b(temp_image).transpose(1,2,0))
             timer.start()
+            
+
+            
             # Densification
             if iteration < opt.densify_until_iter :
                 # Keep track of max radii in image-space for pruning
@@ -275,6 +329,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                     gaussians.densify(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold, 5, 5, scene.model_path, iteration, stage)
                 if  iteration > opt.pruning_from_iter and iteration % opt.pruning_interval == 0 and gaussians.get_xyz.shape[0]>200000:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                    gaussians.prune(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
+
+                if  iteration > opt.pruning_from_iter and iteration % opt.pruning_interval == 0 and gaussians.get_xyz.shape[0]>200000:
+                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
 
                     gaussians.prune(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
                     
@@ -286,7 +344,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                     print("reset opacity")
                     gaussians.reset_opacity()
                     
-            
+            if iteration % prune_freq == 0:
+              gaussians.prune_by_importance(prune_threshold)
 
             # Optimizer step
             if iteration < opt.iterations:

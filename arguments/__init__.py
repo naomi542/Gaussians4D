@@ -103,6 +103,8 @@ class ModelHiddenParams(ParamGroup):
         self.static_mlp=False # useless
         self.apply_rotation=False # useless
 
+
+
         
         super().__init__(parser, "ModelHiddenParams")
         
@@ -147,6 +149,9 @@ class OptimizationParams(ParamGroup):
         self.opacity_threshold_fine_after = 0.005
         self.batch_size=1
         self.add_point=False
+
+        self.importance_lr = 1e-3  # or any small starting value
+
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
