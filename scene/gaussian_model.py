@@ -61,6 +61,14 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self._deformation_table = torch.empty(0)
+<<<<<<< Updated upstream
+=======
+        self._cached_importance_target = torch.empty(0)
+        self._importance_logits = nn.Parameter(torch.empty(0, 1, device="cuda").normal_(mean=0.0, std=1.0), requires_grad=True)
+        self._age =torch.empty(0)
+
+
+>>>>>>> Stashed changes
         self.setup_functions()
 
     def capture(self):
@@ -162,6 +170,15 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device="cuda"),0)
+<<<<<<< Updated upstream
+=======
+        
+        importance = 0.25 * torch.randn((fused_point_cloud.shape[0], 1), device="cuda")
+        self._importance_logits = nn.Parameter(importance.requires_grad_(True))
+        self._age = torch.zeros((self._xyz.shape[0],), dtype=torch.int32, device='cuda')
+
+
+>>>>>>> Stashed changes
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -348,6 +365,23 @@ class GaussianModel:
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
+<<<<<<< Updated upstream
+=======
+
+    
+    def prune_by_importance(self, threshold=0.05, age_threshold = 500):
+        """Prune Gaussians whose importance falls below a threshold."""
+        if self._importance_logits.shape[0] == 0:
+            return
+        prune_mask = (self.importance.view(-1) < threshold) & (self._age > age_threshold)
+        
+        if prune_mask.any():
+            print(f"[Importance Pruning] Pruned {prune_mask.sum().item()} Gaussians with importance < {threshold}.")
+            self.prune_points(prune_mask)
+        else:
+            print("[Importance Pruning] No Gaussians pruned.")    
+    
+>>>>>>> Stashed changes
     def prune_points(self, mask):
         valid_points_mask = ~mask
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
@@ -363,6 +397,14 @@ class GaussianModel:
         self._deformation_table = self._deformation_table[valid_points_mask]
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
+<<<<<<< Updated upstream
+=======
+        self._importance_logits = optimizable_tensors["importance"]
+        self._age = self._age[valid_points_mask]
+
+
+
+>>>>>>> Stashed changes
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -408,9 +450,15 @@ class GaussianModel:
         
         self._deformation_table = torch.cat([self._deformation_table,new_deformation_table],-1)
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self._deformation_accum = torch.zeros((self.get_xyz.shape[0], 3), device="cuda")
+        # self._deformation_accum = torch.zeros((self.get_xyz.shape[0], 3), device="cuda")
+        new = torch.zeros((new_xyz.shape[0], 3), device="cuda")
+        self._deformation_accum = torch.cat([ self._deformation_accum, new], dim=0)
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
+        new_age = torch.zeros((new_xyz.shape[0],), dtype=torch.int32, device="cuda")
+        self._age = torch.cat([self._age, new_age], dim=0)  
+
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
@@ -435,13 +483,33 @@ class GaussianModel:
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
         new_deformation_table = self._deformation_table[selected_pts_mask].repeat(N)
+<<<<<<< Updated upstream
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_deformation_table)
+=======
+        base_importance = self._importance_logits[selected_pts_mask]
+        new_importance = base_importance.repeat(N, 1) * 0.8  
 
-        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
-        self.prune_points(prune_filter)
+        self.densification_postfix(
+            new_xyz, new_features_dc, new_features_rest,
+            new_opacity, new_scaling, new_rotation,
+            new_deformation_table, new_importance
+        )   
+>>>>>>> Stashed changes
+
+        # Actual number of points after densification
+        all_points = self.get_xyz.shape[0]
+
+        # Recreate selected mask that matches current optimizer size
+        selected_mask_full = torch.zeros((all_points,), dtype=torch.bool, device="cuda")
+        selected_mask_full[:n_init_points] = selected_pts_mask  # mark original points to prune
+
+        self.prune_points(selected_mask_full)
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent, density_threshold=20, displacement_scale=20, model_path=None, iteration=None, stage=None):
-        grads_accum_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+        grads_accum = torch.norm(grads, dim=-1)
+        importance_score = self.importance.detach().squeeze()
+        
+        grads_accum_mask =  (grads_accum >= grad_threshold) & (importance_score >= 0.5)
         
 
         selected_pts_mask = torch.logical_and(grads_accum_mask,
@@ -453,7 +521,13 @@ class GaussianModel:
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
         new_deformation_table = self._deformation_table[selected_pts_mask]
+<<<<<<< Updated upstream
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_deformation_table)
+=======
+        new_importance = torch.full((new_xyz.shape[0], 1), 0.25, device="cuda")
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_deformation_table, new_importance)
+>>>>>>> Stashed changes
 
     @property
     def get_aabb(self):

@@ -58,11 +58,12 @@ class Deformation(nn.Module):
             self.feature_out.append(nn.ReLU())
             self.feature_out.append(nn.Linear(self.W,self.W))
         self.feature_out = nn.Sequential(*self.feature_out)
-        self.pos_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3))
-        self.scales_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3))
-        self.rotations_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 4))
-        self.opacity_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 1))
-        self.shs_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 16*3))
+        self.shared_deform = nn.Sequential(nn.Linear(self.W, self.W), nn.ReLU(), nn.Linear(self.W, self.W))
+        self.pos_deform = nn.Sequential(nn.ReLU(), nn.Linear(self.W, 3))
+        self.scales_deform = nn.Sequential( nn.ReLU(),nn.Linear(self.W, 3))
+        self.rotations_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W, 4))
+        self.opacity_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W, 1))
+        self.shs_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W, 16*3))
 
     def query_time(self, rays_pts_emb, scales_emb, rotations_emb, time_feature, time_emb):
 
@@ -77,7 +78,8 @@ class Deformation(nn.Module):
             hidden = torch.cat([grid_feature],-1) 
         
         
-        hidden = self.feature_out(hidden)   
+        hidden = self.feature_out(hidden)         # Main MLP
+        shared = self.shared_deform(hidden)  # Shared MLP
  
 
         return hidden
