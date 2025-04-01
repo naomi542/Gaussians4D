@@ -33,6 +33,7 @@ class Deformation(nn.Module):
             self.static_mlp = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 1))
         
         self.ratio=0
+        
         self.create_net()
     @property
     def get_aabb(self):
@@ -58,12 +59,11 @@ class Deformation(nn.Module):
             self.feature_out.append(nn.ReLU())
             self.feature_out.append(nn.Linear(self.W,self.W))
         self.feature_out = nn.Sequential(*self.feature_out)
-        self.shared_deform = nn.Sequential(nn.Linear(self.W, self.W), nn.ReLU(), nn.Linear(self.W, self.W))
-        self.pos_deform = nn.Sequential(nn.ReLU(), nn.Linear(self.W, 3))
-        self.scales_deform = nn.Sequential( nn.ReLU(),nn.Linear(self.W, 3))
-        self.rotations_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W, 4))
-        self.opacity_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W, 1))
-        self.shs_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W, 16*3))
+        self.pos_deform = nn.Sequential(nn.ReLU(), nn.Linear(self.W, self.W), nn.ReLU(), nn.Linear(self.W, 3))
+        self.scales_deform = nn.Sequential(nn.ReLU(), nn.Linear(self.W, self.W), nn.ReLU(),nn.Linear(self.W, 3))
+        self.rotations_deform = nn.Sequential(nn.ReLU(), nn.Linear(self.W, self.W),nn.ReLU(),nn.Linear(self.W, 4))
+        self.opacity_deform = nn.Sequential(nn.ReLU(), nn.Linear(self.W, self.W), nn.ReLU(),nn.Linear(self.W, 1))
+        self.shs_deform = nn.Sequential(nn.ReLU(), nn.Linear(self.W, self.W), nn.ReLU(),nn.Linear(self.W, 16*3))
 
     def query_time(self, rays_pts_emb, scales_emb, rotations_emb, time_feature, time_emb):
 
@@ -79,7 +79,6 @@ class Deformation(nn.Module):
         
         
         hidden = self.feature_out(hidden)         # Main MLP
-        shared = self.shared_deform(hidden)  # Shared MLP
  
 
         return hidden
@@ -98,6 +97,7 @@ class Deformation(nn.Module):
         return rays_pts_emb[:, :3] + dx
     def forward_dynamic(self,rays_pts_emb, scales_emb, rotations_emb, opacity_emb, shs_emb, time_feature, time_emb):
         hidden = self.query_time(rays_pts_emb, scales_emb, rotations_emb, time_feature, time_emb)
+
         if self.args.static_mlp:
             mask = self.static_mlp(hidden)
         elif self.args.empty_voxel:

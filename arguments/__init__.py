@@ -14,7 +14,9 @@ import sys
 import os
 
 class GroupParams:
-    pass
+  def __init__(self):
+    self.importance_lr = 0.001
+
 
 class ParamGroup:
     def __init__(self, parser: ArgumentParser, name : str, fill_none = False):
@@ -85,6 +87,7 @@ class ModelHiddenParams(ParamGroup):
         self.plane_tv_weight = 0.0001 # TV loss of spatial grid
         self.time_smoothness_weight = 0.01 # TV loss of temporal grid
         self.l1_time_planes = 0.0001  # TV loss of temporal grid
+
         self.kplanes_config = {
                              'grid_dimensions': 2,
                              'input_coordinate_dim': 4,

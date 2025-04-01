@@ -31,6 +31,7 @@ from utils.scene_utils import render_training_image
 from time import time
 import copy
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 to8b = lambda x : (255*np.clip(x.cpu().numpy(),0,1)).astype(np.uint8)
 
 try:
@@ -69,7 +70,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     
     progress_bar = tqdm(range(first_iter, final_iter), desc="Training progress")
     first_iter += 1
-    # lpips_model = lpips.LPIPS(net="alex").cuda()
+    lpips_model = lpips.LPIPS(net="alex", version="0.1").eval().to(device)
+    lpips_model2 = lpips.LPIPS(net="vgg", version="0.1").eval().to(device)
     video_cams = scene.getVideoCameras()
     test_cams = scene.getTestCameras()
     train_cams = scene.getTrainCameras()
@@ -198,23 +200,16 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         gt_image_tensor = torch.cat(gt_images,0)
         # Loss
         # breakpoint()
-        Ll1 = l1_loss(image_tensor, gt_image_tensor[:,:3,:,:])
+        # Encourage visibility-based shaping
 
-<<<<<<< Updated upstream
-        psnr_ = psnr(image_tensor, gt_image_tensor).mean().double()
-        # norm
-        
-
-        loss = Ll1
-=======
         # --- Configurable parameters
         importance_update_freq = 1                # How often to update importance_target
         importance_loss_weight = 1.0              # Scale of importance loss
         importance_mean_weight = 0.01             # Regularize mean importance
-        opacity_regularizer_weight = 0        # Regularize opacity
+        opacity_regularizer_weight = 0.001        # Regularize opacity
         grad_clamp_min = 0.5                      # Prevent punishing low-gradient points
-        prune_freq = 100                          # Frequency of pruning by importance
-        prune_threshold = 0.3                     # Prune Gaussians with importance < threshold
+        prune_freq = 500                          # Frequency of pruning by importance
+        prune_threshold = 0.1                     # Prune Gaussians with importance < threshold
 
         # Contrastive sharpening config - does not work yet
         importance_contrastive_weight = 0.01
@@ -223,48 +218,34 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
         # --- Update importance_target every N steps - expensive (think of alternative)
         if (iteration - 1) % importance_update_freq == 0:
-            vis_mask = render_pkg["visibility_filter"].view(-1, 1)  # [P, 1]
-            contribution = vis_mask * gaussians.get_opacity.detach()
+          # Step 1: Flatten vis_mask to 1D
+          vis_mask = render_pkg["visibility_filter"].view(-1)  # shape [N]
 
-            normed_grad = (gaussians.xyz_gradient_accum / gaussians.denom.clamp_min(1e-6)).clamp(min=grad_clamp_min)
-            normed_grad = normed_grad / normed_grad.max().clamp_min(1e-6)
+          # Step 2: Compute raw importance signal
+          contribution = gaussians.get_opacity.detach().view(-1)  # shape [N]
+          normed_grad = (gaussians.xyz_gradient_accum / gaussians.denom.clamp_min(1e-6)).view(-1)
+          normed_grad = normed_grad / normed_grad.max().clamp_min(1e-6)
+          normed_grad = normed_grad.clamp(min=grad_clamp_min)
 
-            raw = 0.5 * contribution + 0.5 * normed_grad
-            raw = raw.view(-1)  # Flatten to [P]
-            raw_normed = (raw - raw.min()) / (raw.max() - raw.min() + 1e-6)
+          # Step 3: Compute importance target
+          importance_target = (contribution * normed_grad).detach()  # [N]
 
+          # Step 4: Apply mask safely
+          importance_target_masked = importance_target[vis_mask]  # shape [M], where M is number of visible points
+          importance_pred_masked = gaussians.importance.view(-1)[vis_mask]  # same shape
 
-            # Top-k binarization
-            # k = int(0.20 * raw.shape[0])
-            # topk_val = torch.topk(raw, k, sorted=True)[0][-1]
-            # prune_threshold = topk_val
-            # importance_target = (raw >= topk_val).float().unsqueeze(-1)  # [P, 1]
-            importance_target = raw_normed.unsqueeze(-1)  # [P, 1]
+          # Step 5: Compute loss
+          importance_loss = torch.nn.SmoothL1Loss(beta=0.1)(
+              importance_pred_masked,
+              importance_target_masked
+          )
 
-            # Apply visibility mask again, just in case
-            importance_target *= vis_mask
-
-
-            # if hasattr(gaussians, "_cached_importance_target") and gaussians._cached_importance_target.shape == importance_target.shape: 
-            #   momentum = 0.1
-            #   gaussians._cached_importance_target = (
-            #       momentum * gaussians._cached_importance_target +
-            #       (1 - momentum) * importance_target
-            #   )
-            # else:
-            #   gaussians._cached_importance_target = importance_target  # cache for future steps
 
         # --- Compute losses
         Ll1 = l1_loss(image_tensor, gt_image_tensor[:, :3, :, :])
         psnr_ = psnr(image_tensor, gt_image_tensor).mean()
 
         # Base importance loss - expensive (think of alternative) / Try different functions
-        importance_loss = torch.nn.BCEWithLogitsLoss()(gaussians._importance_logits, importance_target)
-
-        if iteration % 100 == 0:
-          imp = gaussians.importance.detach().cpu().squeeze()
-          print(f"[{iteration}] Importance stats: min={imp.min():.4f}, max={imp.max():.4f}, mean={imp.mean():.4f}, std={imp.std():.4f}")
-
 
         # Contrastive sharpening --- does not work yest
         # target = gaussians._cached_importance_target.detach().squeeze(-1)
@@ -285,8 +266,6 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         # --- Final total loss
         loss = Ll1 + (importance_loss_weight * importance_loss) + importance_regularizer + opacity_regularizer # + importance_contrastive_loss
 
-
->>>>>>> Stashed changes
         if stage == "fine" and hyper.time_smoothness_weight != 0:
             # tv_loss = 0
             tv_loss = gaussians.compute_regulation(hyper.time_smoothness_weight, hyper.l1_time_planes, hyper.plane_tv_weight)
@@ -297,8 +276,16 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         # if opt.lambda_lpips !=0:
         #     lpipsloss = lpips_loss(image_tensor,gt_image_tensor,lpips_model)
         #     loss += opt.lambda_lpips * lpipsloss
-        
+
+        gaussians._age += 1
+
         loss.backward()
+
+        if iteration % 100 == 0:
+            imp = gaussians.importance.detach().cpu().squeeze()
+            print(f"[{iteration}] Importance stats: min={imp.min():.4f}, max={imp.max():.4f}, mean={imp.mean():.4f}, std={imp.std():.4f}")
+
+
         if torch.isnan(loss).any():
             print("loss is nan,end training, reexecv program now.")
             os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -322,7 +309,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
             # Log and save
             timer.pause()
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, [pipe, background], stage, scene.dataset_type)
+            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, lpips_model, lpips_model2, scene, render, [pipe, background], stage, scene.dataset_type)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration, stage)
@@ -337,12 +324,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
                     # total_images.append(to8b(temp_image).transpose(1,2,0))
             timer.start()
-<<<<<<< Updated upstream
-=======
             
-            gaussians._age += 1
-            
->>>>>>> Stashed changes
             # Densification
             if iteration < opt.densify_until_iter :
                 # Keep track of max radii in image-space for pruning
@@ -361,6 +343,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                     gaussians.densify(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold, 5, 5, scene.model_path, iteration, stage)
                 if  iteration > opt.pruning_from_iter and iteration % opt.pruning_interval == 0 and gaussians.get_xyz.shape[0]>200000:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                    gaussians.prune(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
+
+                if  iteration > opt.pruning_from_iter and iteration % opt.pruning_interval == 0 and gaussians.get_xyz.shape[0]>200000:
+                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
 
                     gaussians.prune(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
                     
@@ -372,12 +358,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                     print("reset opacity")
                     gaussians.reset_opacity()
                     
-<<<<<<< Updated upstream
-            
-=======
-            if iteration % prune_freq == 0 and stage != 'coarse' and iteration > 5000:
+            if iteration % prune_freq == 0 and stage == 'fine':
               gaussians.prune_by_importance(prune_threshold)
->>>>>>> Stashed changes
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -425,7 +407,7 @@ def prepare_output_and_logger(expname):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, stage, dataset_type):
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, lpips_model, lpips_model2, scene : Scene, renderFunc, renderArgs, stage, dataset_type):
     if tb_writer:
         tb_writer.add_scalar(f'{stage}/train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar(f'{stage}/train_loss_patchestotal_loss', loss.item(), iteration)
@@ -443,6 +425,10 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
             if config['cameras'] and len(config['cameras']) > 0:
                 l1_test = 0.0
                 psnr_test = 0.0
+                ssim_test = 0.0
+                n = 0
+                lpips_test_a = 0.0
+                lpips_test_v = 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians,stage=stage, cam_type=dataset_type, *renderArgs)["render"], 0.0, 1.0)
                     if dataset_type == "PanopticSports":
@@ -458,15 +444,26 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                         pass
                     l1_test += l1_loss(image, gt_image).mean().double()
                     # mask=viewpoint.mask
+
+                    lpips_test_a += lpips_model(gt_image, image, normalize=True).item()
+
+                    lpips_test_v += lpips_model2(gt_image, image, normalize=True).item()
+                    
+                    ssim_test += ssim(image,gt_image)
+                    n += 1
                     
                     psnr_test += psnr(image, gt_image, mask=None).mean().double()
+
                 psnr_test /= len(config['cameras'])
                 l1_test /= len(config['cameras'])          
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {} SSIM {} LPIPSA {} LPIPSV {}".format(iteration, config['name'], l1_test, psnr_test, ssim_test/n, lpips_test_a/n, lpips_test_v/n))
                 # print("sh feature",scene.gaussians.get_features.shape)
                 if tb_writer:
                     tb_writer.add_scalar(stage + "/"+config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(stage+"/"+config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+                    tb_writer.add_scalar(stage+"/"+config['name'] + '/loss_viewpoint - ssim', ssim_test, iteration)
+                    tb_writer.add_scalar(stage + "/"+config['name'] + '/loss_viewpoint - lpipsa', lpips_test_a, iteration)
+                    tb_writer.add_scalar(stage+"/"+config['name'] + '/loss_viewpoint - lpipsv', lpips_test_v, iteration)
 
         if tb_writer:
             tb_writer.add_histogram(f"{stage}/scene/opacity_histogram", scene.gaussians.get_opacity, iteration)

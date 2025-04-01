@@ -61,14 +61,12 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self._deformation_table = torch.empty(0)
-<<<<<<< Updated upstream
-=======
         self._cached_importance_target = torch.empty(0)
         self._importance_logits = nn.Parameter(torch.empty(0, 1, device="cuda").normal_(mean=0.0, std=1.0), requires_grad=True)
         self._age =torch.empty(0)
+        
 
 
->>>>>>> Stashed changes
         self.setup_functions()
 
     def capture(self):
@@ -88,6 +86,7 @@ class GaussianModel:
             self.denom,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
+            self._importance_logits
         )
     
     def restore(self, model_args, training_args):
@@ -112,6 +111,12 @@ class GaussianModel:
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
+        self._importance_logits = model_args[-1]
+
+
+    @property
+    def importance(self):
+        return torch.sigmoid(self._importance_logits)
 
     @property
     def get_scaling(self):
@@ -170,20 +175,18 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device="cuda"),0)
-<<<<<<< Updated upstream
-=======
         
         importance = 0.25 * torch.randn((fused_point_cloud.shape[0], 1), device="cuda")
         self._importance_logits = nn.Parameter(importance.requires_grad_(True))
         self._age = torch.zeros((self._xyz.shape[0],), dtype=torch.int32, device='cuda')
 
 
->>>>>>> Stashed changes
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self._deformation_accum = torch.zeros((self.get_xyz.shape[0],3),device="cuda")
+        
         
 
         l = [
@@ -194,7 +197,9 @@ class GaussianModel:
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
+            {'params': [self._importance_logits], 'lr': training_args.importance_lr, "name": "importance"},
+
             
         ]
 
@@ -240,6 +245,8 @@ class GaussianModel:
             l.append('scale_{}'.format(i))
         for i in range(self._rotation.shape[1]):
             l.append('rot_{}'.format(i))
+        l.append("importance")
+
         return l
     def compute_deformation(self,time):
         
@@ -274,11 +281,13 @@ class GaussianModel:
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
+        importance = self.importance.detach().cpu().numpy()
+
         
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, importance), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
@@ -288,6 +297,7 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
+
     def load_ply(self, path):
         plydata = PlyData.read(path)
 
@@ -295,6 +305,8 @@ class GaussianModel:
                         np.asarray(plydata.elements[0]["y"]),
                         np.asarray(plydata.elements[0]["z"])),  axis=1)
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+        importance = np.asarray(plydata.elements[0]["importance"])[..., np.newaxis]
+
 
         features_dc = np.zeros((xyz.shape[0], 3, 1))
         features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
@@ -329,6 +341,8 @@ class GaussianModel:
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
         self.active_sh_degree = self.max_sh_degree
+        self._importance_logits = nn.Parameter(torch.logit(torch.tensor(importance, dtype=torch.float32, device="cuda").clamp(1e-5, 1 - 1e-5)), requires_grad=True)
+
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
@@ -365,11 +379,9 @@ class GaussianModel:
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
-<<<<<<< Updated upstream
-=======
 
     
-    def prune_by_importance(self, threshold=0.05, age_threshold = 500):
+    def prune_by_importance(self, threshold=0.05, age_threshold = 1000):
         """Prune Gaussians whose importance falls below a threshold."""
         if self._importance_logits.shape[0] == 0:
             return
@@ -381,7 +393,6 @@ class GaussianModel:
         else:
             print("[Importance Pruning] No Gaussians pruned.")    
     
->>>>>>> Stashed changes
     def prune_points(self, mask):
         valid_points_mask = ~mask
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
@@ -397,14 +408,11 @@ class GaussianModel:
         self._deformation_table = self._deformation_table[valid_points_mask]
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
-<<<<<<< Updated upstream
-=======
         self._importance_logits = optimizable_tensors["importance"]
         self._age = self._age[valid_points_mask]
 
 
 
->>>>>>> Stashed changes
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -429,15 +437,18 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_deformation_table):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_deformation_table, new_importance=None):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
         "opacity": new_opacities,
         "scaling" : new_scaling,
         "rotation" : new_rotation,
+        "importance": new_importance  # 👈 add this
         # "deformation": new_deformation
        }
+        if new_importance is None:
+          new_importance = torch.zeros((new_xyz.shape[0], 1), device="cuda")
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
@@ -447,6 +458,8 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         # self._deformation = optimizable_tensors["deformation"]
+        self._importance_logits = optimizable_tensors["importance"]
+
         
         self._deformation_table = torch.cat([self._deformation_table,new_deformation_table],-1)
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -483,9 +496,6 @@ class GaussianModel:
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
         new_deformation_table = self._deformation_table[selected_pts_mask].repeat(N)
-<<<<<<< Updated upstream
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_deformation_table)
-=======
         base_importance = self._importance_logits[selected_pts_mask]
         new_importance = base_importance.repeat(N, 1) * 0.8  
 
@@ -494,7 +504,6 @@ class GaussianModel:
             new_opacity, new_scaling, new_rotation,
             new_deformation_table, new_importance
         )   
->>>>>>> Stashed changes
 
         # Actual number of points after densification
         all_points = self.get_xyz.shape[0]
@@ -507,10 +516,8 @@ class GaussianModel:
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent, density_threshold=20, displacement_scale=20, model_path=None, iteration=None, stage=None):
         grads_accum = torch.norm(grads, dim=-1)
-        importance_score = self.importance.detach().squeeze()
-        
-        grads_accum_mask =  (grads_accum >= grad_threshold) & (importance_score >= 0.5)
-        
+
+        grads_accum_mask = (grads_accum >= grad_threshold)       
 
         selected_pts_mask = torch.logical_and(grads_accum_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
@@ -521,13 +528,9 @@ class GaussianModel:
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
         new_deformation_table = self._deformation_table[selected_pts_mask]
-<<<<<<< Updated upstream
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_deformation_table)
-=======
         new_importance = torch.full((new_xyz.shape[0], 1), 0.25, device="cuda")
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_deformation_table, new_importance)
->>>>>>> Stashed changes
 
     @property
     def get_aabb(self):
@@ -649,3 +652,4 @@ class GaussianModel:
         return total
     def compute_regulation(self, time_smoothness_weight, l1_time_planes_weight, plane_tv_weight):
         return plane_tv_weight * self._plane_regulation() + time_smoothness_weight * self._time_regulation() + l1_time_planes_weight * self._l1_regulation()
+
